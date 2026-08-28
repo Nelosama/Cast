@@ -1,0 +1,5 @@
+pychromecast>=14.0.0
+zeroconf>=0.130.0
+flask>=3.0.0
+requests>=2.31.0
+psutil>=5.9.0

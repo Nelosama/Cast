@@ -74,13 +74,27 @@ namespace CastDesktop
         {
             Dispatcher.Invoke(() =>
             {
+                var previouslySelected = CmbDevices.SelectedItem as CastDevice;
+
                 _devices = devices;
                 CmbDevices.ItemsSource = null;
                 CmbDevices.ItemsSource = _devices;
 
                 if (_devices.Count > 0)
                 {
-                    if (CmbDevices.SelectedIndex < 0)
+                    CastDevice? matchedDevice = null;
+                    if (previouslySelected != null)
+                    {
+                        matchedDevice = _devices.FirstOrDefault(d =>
+                            (!string.IsNullOrEmpty(d.Uuid) && d.Uuid == previouslySelected.Uuid) ||
+                            (!string.IsNullOrEmpty(d.Name) && d.Name == previouslySelected.Name));
+                    }
+
+                    if (matchedDevice != null)
+                    {
+                        CmbDevices.SelectedItem = matchedDevice;
+                    }
+                    else
                     {
                         CmbDevices.SelectedIndex = 0;
                     }
@@ -94,13 +108,31 @@ namespace CastDesktop
             {
                 if (isCasting)
                 {
-                    TxtStatusState.Text = "Transmitiendo";
-                    TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#388E3C"));
+                    string msg = !string.IsNullOrEmpty(statusMessage) ? statusMessage : "Transmitiendo";
+                    TxtStatusState.Text = msg;
+
+                    if (msg.Contains("Reconectando"))
+                    {
+                        TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#F57C00"));
+                    }
+                    else
+                    {
+                        TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#388E3C"));
+                    }
                 }
                 else
                 {
-                    TxtStatusState.Text = "Detenido";
+                    _isStreaming = false;
+                    _ffmpegService.StopStreaming();
+
+                    BtnStartStop.Content = "▶ INICIAR TRANSMISIÓN";
+                    BtnStartStop.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4CAF50"));
+                    BtnReconnect.IsEnabled = false;
+
+                    TxtStatusState.Text = !string.IsNullOrEmpty(statusMessage) ? statusMessage : "Detenido";
                     TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#C62828"));
+                    TxtStatusFps.Text = "0.0 FPS";
+                    TxtStatusBitrate.Text = "0 Kbps";
                 }
             });
         }

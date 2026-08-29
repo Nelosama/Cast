@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -15,9 +13,9 @@ namespace CastDesktop
 {
     public partial class MainWindow : Window
     {
-        private readonly CastBackendClient _backendClient;
+        private readonly ChromecastService _chromecastService;
+        private readonly HttpStreamServer _httpStreamServer;
         private readonly FFmpegService _ffmpegService;
-        private Process? _backendProcess;
         private DispatcherTimer _telemetryTimer;
 
         private List<CastDevice> _devices = new();
@@ -27,12 +25,20 @@ namespace CastDesktop
         {
             InitializeComponent();
 
-            _backendClient = new CastBackendClient();
+            _chromecastService = new ChromecastService();
+            _httpStreamServer = new HttpStreamServer();
             _ffmpegService = new FFmpegService();
+
+            _chromecastService.LogReceived += AppendLog;
+            _chromecastService.DevicesDiscovered += OnDevicesDiscovered;
+            _chromecastService.StatusChanged += OnChromecastStatusChanged;
+
+            _httpStreamServer.LogReceived += AppendLog;
 
             _ffmpegService.LogReceived += OnFFmpegLogReceived;
             _ffmpegService.StatsUpdated += OnFFmpegStatsUpdated;
             _ffmpegService.ProcessExited += OnFFmpegProcessExited;
+            _ffmpegService.PermissionErrorDetected += OnFFmpegPermissionErrorDetected;
 
             _telemetryTimer = new DispatcherTimer
             {
@@ -44,12 +50,15 @@ namespace CastDesktop
             Closed += MainWindow_Closed;
         }
 
-        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
-            AppendLog("Iniciando CastDesktop HD...");
-            EnsureBackendRunning();
-            await RefreshDevicesAsync();
-            await CheckBandwidthAsync();
+            AppendLog("Iniciando CastDesktop HD (Modo Nativo C# / Sin Python)...");
+
+            _httpStreamServer.Start(5000, 8088);
+            TxtBackendState.Text = $"Backend C#: Activo ({_chromecastService.GetLocalIPAddress()}:5000)";
+
+            _chromecastService.StartDiscovery();
+            CheckBandwidthAsync();
             _telemetryTimer.Start();
         }
 
@@ -57,134 +66,75 @@ namespace CastDesktop
         {
             _telemetryTimer.Stop();
             _ffmpegService.StopStreaming();
-            StopBackendProcess();
+            _chromecastService.StopDiscovery();
+            _httpStreamServer.Stop();
         }
 
-        private void EnsureBackendRunning()
+        private void OnDevicesDiscovered(List<CastDevice> devices)
         {
-            Task.Run(async () =>
+            Dispatcher.Invoke(() =>
             {
-                var status = await _backendClient.GetStatusAsync();
-                if (status == null)
+                _devices = devices;
+                CmbDevices.ItemsSource = null;
+                CmbDevices.ItemsSource = _devices;
+
+                if (_devices.Count > 0)
                 {
-                    Dispatcher.Invoke(() => AppendLog("Servicio backend no detectado en puerto 5000. Intentando iniciar python app.py..."));
-                    StartPythonBackend();
-                }
-                else
-                {
-                    Dispatcher.Invoke(() => TxtBackendState.Text = $"Backend: Activo (IP {status.LocalIp})");
+                    if (CmbDevices.SelectedIndex < 0)
+                    {
+                        CmbDevices.SelectedIndex = 0;
+                    }
                 }
             });
         }
 
-        private void StartPythonBackend()
+        private void OnChromecastStatusChanged(bool isCasting, string? statusMessage)
         {
-            try
+            Dispatcher.Invoke(() =>
             {
-                string scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "cast_backend", "app.py");
-                if (!File.Exists(scriptPath))
+                if (isCasting)
                 {
-                    scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cast_backend", "app.py");
-                }
-
-                if (File.Exists(scriptPath))
-                {
-                    string pythonExe = GetPythonExecutable();
-                    ProcessStartInfo startInfo = new ProcessStartInfo
-                    {
-                        FileName = pythonExe,
-                        Arguments = $"\"{scriptPath}\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true
-                    };
-                    _backendProcess = Process.Start(startInfo);
-                    AppendLog($"Servidor Python ({pythonExe}) iniciado en background: PID {_backendProcess?.Id}");
+                    TxtStatusState.Text = "Transmitiendo";
+                    TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#388E3C"));
                 }
                 else
                 {
-                    AppendLog("AVISO: No se encontró script 'app.py' para auto-iniciar backend local.");
+                    TxtStatusState.Text = "Detenido";
+                    TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#C62828"));
                 }
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"Error iniciando script backend: {ex.Message}");
-            }
+            });
         }
 
-        private string GetPythonExecutable()
+        private Task CheckBandwidthAsync()
         {
-            if (OperatingSystem.IsWindows())
-            {
-                // Check if python.exe exists in PATH
-                string? path = Environment.GetEnvironmentVariable("PATH");
-                if (path != null)
-                {
-                    foreach (var p in path.Split(Path.PathSeparator))
-                    {
-                        string fullPath = Path.Combine(p.Trim(), "python.exe");
-                        if (File.Exists(fullPath)) return fullPath;
-                    }
-                }
-                return "python";
-            }
-            return "python3";
-        }
-
-        private void StopBackendProcess()
-        {
-            if (_backendProcess != null && !_backendProcess.HasExited)
-            {
-                try
-                {
-                    _backendProcess.Kill();
-                }
-                catch { }
-            }
-        }
-
-        private async Task RefreshDevicesAsync()
-        {
-            BtnRefreshDevices.IsEnabled = false;
-            AppendLog("Buscando dispositivos Chromecast en la red local vía mDNS...");
-
-            _devices = await _backendClient.GetDevicesAsync();
-            CmbDevices.ItemsSource = null;
-            CmbDevices.ItemsSource = _devices;
-
-            if (_devices.Count > 0)
-            {
-                CmbDevices.SelectedIndex = 0;
-                AppendLog($"Se encontraron {_devices.Count} dispositivo(s) Chromecast.");
-            }
-            else
-            {
-                AppendLog("⚠️ No se encontraron dispositivos Chromecast en la red local.");
-            }
-
-            BtnRefreshDevices.IsEnabled = true;
-        }
-
-        private async Task CheckBandwidthAsync()
-        {
-            var (lanConnected, warning) = await _backendClient.CheckBandwidthAsync();
-            if (!string.IsNullOrEmpty(warning))
+            var status = NetworkService.CheckNetworkSpeed(SelectedQualityProfile.BitrateKbps);
+            if (!string.IsNullOrEmpty(status.WarningMessage))
             {
                 BorderWarning.Visibility = Visibility.Visible;
-                TxtWarningMessage.Text = warning;
-                AppendLog($"Advertencia de red: {warning}");
+                TxtWarningMessage.Text = status.WarningMessage;
+                AppendLog(status.WarningMessage);
             }
             else
             {
                 BorderWarning.Visibility = Visibility.Collapsed;
             }
+            return Task.CompletedTask;
         }
 
-        private async void BtnRefreshDevices_Click(object sender, RoutedEventArgs e)
+        private void OnFFmpegPermissionErrorDetected(string errorMessage)
         {
-            await RefreshDevicesAsync();
-            await CheckBandwidthAsync();
+            Dispatcher.Invoke(() =>
+            {
+                AppendLog($"⛔ ERROR DE PERMISOS: {errorMessage}");
+                MessageBox.Show(errorMessage, "Permiso de Captura Denegado", MessageBoxButton.OK, MessageBoxImage.Error);
+            });
+        }
+
+        private void BtnRefreshDevices_Click(object sender, RoutedEventArgs e)
+        {
+            AppendLog("Buscando dispositivos Chromecast en la red local vía mDNS...");
+            _chromecastService.StartDiscovery();
+            CheckBandwidthAsync();
         }
 
         private void CmbSourceType_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -217,11 +167,13 @@ namespace CastDesktop
                 GridCustomQuality.IsEnabled = false;
                 GridCustomQuality.Opacity = 0.5;
             }
+
+            CheckBandwidthAsync();
         }
 
         private void CustomSetting_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            // Custom settings slider listener
+            CheckBandwidthAsync();
         }
 
         private QualityProfile SelectedQualityProfile
@@ -295,7 +247,7 @@ namespace CastDesktop
             AppendLog($"Stream HTTP de FFmpeg listo en: {_ffmpegService.StreamUrl}");
             AppendLog($"Enviando orden de reproducción a Chromecast '{selectedDevice.Name}'...");
 
-            var (success, message) = await _backendClient.StartCastAsync(selectedDevice.Name, _ffmpegService.StreamUrl);
+            var (success, message) = await _chromecastService.StartCastAsync(selectedDevice, _ffmpegService.StreamUrl);
             if (success)
             {
                 _isStreaming = true;
@@ -320,7 +272,7 @@ namespace CastDesktop
         {
             AppendLog("Deteniendo transmisión...");
             _ffmpegService.StopStreaming();
-            await _backendClient.StopCastAsync();
+            await _chromecastService.StopCastAsync();
 
             _isStreaming = false;
             BtnStartStop.Content = "▶ INICIAR TRANSMISIÓN";
@@ -341,7 +293,7 @@ namespace CastDesktop
             if (selectedDevice == null || !_isStreaming) return;
 
             AppendLog($"Reconectando sesión de transmisión con {selectedDevice.Name}...");
-            var (success, message) = await _backendClient.StartCastAsync(selectedDevice.Name, _ffmpegService.StreamUrl);
+            var (success, message) = await _chromecastService.StartCastAsync(selectedDevice, _ffmpegService.StreamUrl);
             if (success)
             {
                 AppendLog("Reconexión exitosa.");
@@ -352,21 +304,9 @@ namespace CastDesktop
             }
         }
 
-        private async void TelemetryTimer_Tick(object? sender, EventArgs e)
+        private void TelemetryTimer_Tick(object? sender, EventArgs e)
         {
-            var status = await _backendClient.GetStatusAsync();
-            if (status != null)
-            {
-                TxtBackendState.Text = $"Backend: Conectado ({status.LocalIp})";
-                if (!string.IsNullOrEmpty(status.LastError))
-                {
-                    AppendLog($"Aviso de Backend: {status.LastError}");
-                }
-            }
-            else
-            {
-                TxtBackendState.Text = "Backend: Desconectado";
-            }
+            TxtBackendState.Text = $"Backend C#: Activo ({_chromecastService.GetLocalIPAddress()}:5000)";
         }
 
         private void OnFFmpegLogReceived(string log)

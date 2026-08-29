@@ -74,13 +74,27 @@ namespace CastDesktop
         {
             Dispatcher.Invoke(() =>
             {
+                var previouslySelected = CmbDevices.SelectedItem as CastDevice;
+
                 _devices = devices;
                 CmbDevices.ItemsSource = null;
                 CmbDevices.ItemsSource = _devices;
 
                 if (_devices.Count > 0)
                 {
-                    if (CmbDevices.SelectedIndex < 0)
+                    CastDevice? matchedDevice = null;
+                    if (previouslySelected != null)
+                    {
+                        matchedDevice = _devices.FirstOrDefault(d =>
+                            (!string.IsNullOrEmpty(d.Uuid) && d.Uuid == previouslySelected.Uuid) ||
+                            (!string.IsNullOrEmpty(d.Name) && d.Name == previouslySelected.Name));
+                    }
+
+                    if (matchedDevice != null)
+                    {
+                        CmbDevices.SelectedItem = matchedDevice;
+                    }
+                    else
                     {
                         CmbDevices.SelectedIndex = 0;
                     }

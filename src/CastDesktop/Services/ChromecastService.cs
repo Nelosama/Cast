@@ -17,8 +17,11 @@ namespace CastDesktop.Services
     {
         private ChromecastClient? _client;
         private CancellationTokenSource? _discoveryCts;
+        private CancellationTokenSource? _monitorCts;
+        private readonly SemaphoreSlim _reconnectSemaphore = new(1, 1);
         private readonly List<CastDevice> _discoveredDevices = new();
         private readonly object _devicesLock = new();
+        private volatile bool _isUserStopping = false;
 
         public event Action<List<CastDevice>>? DevicesDiscovered;
         public event Action<string>? LogReceived;
@@ -115,11 +118,20 @@ namespace CastDesktop.Services
 
         public async Task<(bool success, string message)> StartCastAsync(CastDevice device, string streamUrl)
         {
+            _isUserStopping = false;
             try
             {
                 LogReceived?.Invoke($"[ChromecastService] Conectando a {device.Name} en {device.Host}:{device.Port}...");
 
+                if (_client != null)
+                {
+                    try { await _client.DisconnectAsync(); } catch { }
+                    _client = null;
+                }
+
                 _client = new ChromecastClient();
+                AttachClientEvents(_client);
+
                 var receiver = new ChromecastReceiver
                 {
                     DeviceUri = new Uri($"https://{device.Host}:{device.Port}")
@@ -146,6 +158,8 @@ namespace CastDesktop.Services
                 StatusChanged?.Invoke(true, $"Transmitiendo hacia {device.Name}");
                 LogReceived?.Invoke($"[ChromecastService] Transmisión iniciada exitosamente hacia {device.Name} ({streamUrl})");
 
+                StartReconnectionMonitor();
+
                 return (true, $"Transmisión iniciada hacia {device.Name}");
             }
             catch (Exception ex)
@@ -157,12 +171,182 @@ namespace CastDesktop.Services
             }
         }
 
+        private void AttachClientEvents(ChromecastClient client)
+        {
+            client.Disconnected += OnClientDisconnected;
+            if (client.MediaChannel != null)
+            {
+                client.MediaChannel.StatusChanged += OnMediaStatusChanged;
+            }
+        }
+
+        private void OnClientDisconnected(object? sender, EventArgs e)
+        {
+            if (IsCasting && !_isUserStopping)
+            {
+                LogReceived?.Invoke("[ChromecastService] Desconexión detectada vía evento Disconnected.");
+                Task.Run(() => TryAutoReconnectAsync());
+            }
+        }
+
+        private void OnMediaStatusChanged(object? sender, MediaStatus status)
+        {
+            if (IsCasting && !_isUserStopping && status != null && status.PlayerState == PlayerStateType.Idle)
+            {
+                LogReceived?.Invoke("[ChromecastService] Estado de reproductor pasó a IDLE inesperadamente.");
+                Task.Run(() => TryAutoReconnectAsync());
+            }
+        }
+
+        private void StartReconnectionMonitor()
+        {
+            StopReconnectionMonitor();
+            _monitorCts = new CancellationTokenSource();
+            Task.Run(() => BackgroundMonitorLoopAsync(_monitorCts.Token));
+            LogReceived?.Invoke("[ChromecastService] Monitor de reconexión automática iniciado en background.");
+        }
+
+        private void StopReconnectionMonitor()
+        {
+            _monitorCts?.Cancel();
+            _monitorCts = null;
+        }
+
+        private async Task BackgroundMonitorLoopAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(4000, ct);
+
+                    if (!IsCasting || _isUserStopping) continue;
+
+                    bool shouldReconnect = false;
+                    if (_client == null)
+                    {
+                        shouldReconnect = true;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var status = await _client.MediaChannel.GetMediaStatusAsync();
+                            if (status == null || status.PlayerState == PlayerStateType.Idle)
+                            {
+                                shouldReconnect = true;
+                            }
+                        }
+                        catch
+                        {
+                            shouldReconnect = true;
+                        }
+                    }
+
+                    if (shouldReconnect && IsCasting && !_isUserStopping)
+                    {
+                        LogReceived?.Invoke("[ChromecastService] Monitor detectó pérdida de sesión/canal de media.");
+                        await TryAutoReconnectAsync();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    LogReceived?.Invoke($"[ChromecastService] Error en monitor de reconexión: {ex.Message}");
+                }
+            }
+        }
+
+        private async Task TryAutoReconnectAsync()
+        {
+            if (!_reconnectSemaphore.Wait(0)) return;
+
+            try
+            {
+                if (!IsCasting || _isUserStopping || CurrentDevice == null || string.IsNullOrEmpty(ActiveStreamUrl))
+                    return;
+
+                const int maxAttempts = 3;
+                bool reconnected = false;
+
+                for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                {
+                    if (_isUserStopping) break;
+
+                    LogReceived?.Invoke($"[ChromecastService] Intentando reconexión automática ({attempt}/{maxAttempts}) a {CurrentDevice.Name}...");
+                    StatusChanged?.Invoke(true, $"Reconectando... ({attempt}/{maxAttempts})");
+
+                    try
+                    {
+                        if (_client != null)
+                        {
+                            try { _client.Disconnected -= OnClientDisconnected; } catch { }
+                            try { await _client.DisconnectAsync(); } catch { }
+                            _client = null;
+                        }
+
+                        _client = new ChromecastClient();
+                        AttachClientEvents(_client);
+
+                        var receiver = new ChromecastReceiver
+                        {
+                            DeviceUri = new Uri($"https://{CurrentDevice.Host}:{CurrentDevice.Port}")
+                        };
+
+                        await _client.ConnectChromecast(receiver);
+                        await _client.LaunchApplicationAsync("CC1AD845");
+
+                        var media = new Media
+                        {
+                            ContentUrl = ActiveStreamUrl,
+                            ContentType = "video/mp4",
+                            StreamType = StreamType.Live
+                        };
+
+                        await _client.MediaChannel.LoadAsync(media);
+
+                        reconnected = true;
+                        IsCasting = true;
+                        StatusChanged?.Invoke(true, $"Transmitiendo hacia {CurrentDevice.Name}");
+                        LogReceived?.Invoke($"[ChromecastService] Reconexión automática exitosa en el intento {attempt}.");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogReceived?.Invoke($"[ChromecastService] Fallo en intento {attempt}/{maxAttempts} de reconexión: {ex.Message}");
+                        if (attempt < maxAttempts)
+                        {
+                            await Task.Delay(2000);
+                        }
+                    }
+                }
+
+                if (!reconnected && !_isUserStopping)
+                {
+                    IsCasting = false;
+                    StatusChanged?.Invoke(false, "Conexión perdida. Se agotaron los reintentos.");
+                    LogReceived?.Invoke("[ChromecastService] No se pudo restablecer la conexión después de 3 intentos.");
+                }
+            }
+            finally
+            {
+                _reconnectSemaphore.Release();
+            }
+        }
+
         public async Task StopCastAsync()
         {
+            _isUserStopping = true;
+            StopReconnectionMonitor();
+
             try
             {
                 if (_client != null)
                 {
+                    try { _client.Disconnected -= OnClientDisconnected; } catch { }
                     await _client.MediaChannel.StopAsync();
                     await _client.DisconnectAsync();
                     _client = null;

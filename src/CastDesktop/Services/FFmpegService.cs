@@ -33,7 +33,7 @@ namespace CastDesktop.Services
                 return false;
             }
 
-            // Stream URL hosted on Python Flask persistent server for Chromecast playback
+            // Stream URL hosted on embedded C# HTTP server for Chromecast playback
             StreamUrl = $"http://{GetLocalIPAddress()}:{backendHttpPort}/stream/live.mp4";
 
             ProcessStartInfo startInfo = new ProcessStartInfo

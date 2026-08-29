@@ -15,6 +15,7 @@ namespace CastDesktop.Services
         public event Action<string>? LogReceived;
         public event Action<double, double>? StatsUpdated; // (fps, bitrateKbps)
         public event Action<int>? ProcessExited;
+        public event Action<string>? PermissionErrorDetected;
 
         public string StreamUrl { get; private set; } = string.Empty;
 
@@ -35,60 +36,80 @@ namespace CastDesktop.Services
             // Stream URL hosted on Python Flask persistent server for Chromecast playback
             StreamUrl = $"http://{GetLocalIPAddress()}:{backendHttpPort}/stream/live.mp4";
 
-            // Build FFmpeg command for High Image Quality
-            string inputArgs;
-            if (targetSource.StartsWith("window="))
-            {
-                string windowTitle = targetSource.Substring("window=".Length);
-                inputArgs = $"-f gdigrab -framerate {profile.Framerate} -i title=\"{windowTitle}\"";
-            }
-            else
-            {
-                // Full Desktop Screen Capture
-                inputArgs = $"-f gdigrab -framerate {profile.Framerate} -draw_mouse 1 -i desktop";
-            }
-
-            string scaleFilter = "";
-            if (profile.Resolution == "1920x1080")
-            {
-                scaleFilter = "-vf \"scale=1920:1080:flags=lanczos\"";
-            }
-            else if (profile.Resolution == "3840x2160")
-            {
-                scaleFilter = "-vf \"scale=3840:2160:flags=lanczos\"";
-            }
-            else if (profile.Resolution == "1280x720")
-            {
-                scaleFilter = "-vf \"scale=1280:720:flags=lanczos\"";
-            }
-
-            int bitrateKbps = profile.BitrateKbps;
-            int maxRateKbps = (int)(bitrateKbps * 1.2);
-            int bufSizeKbps = bitrateKbps * 2;
-
-            // Ensure valid codec profile (x265 uses main profile, x264 uses high profile)
-            string codecProfile = profile.Codec == "libx265" ? "main" : profile.Profile;
-
-            string videoCodecArgs = $"-c:v {profile.Codec} -preset {profile.Preset} -profile:v {codecProfile} " +
-                                   $"-pix_fmt yuv420p -b:v {bitrateKbps}k -maxrate {maxRateKbps}k -bufsize {bufSizeKbps}k " +
-                                   $"-g {profile.Framerate * 2} {scaleFilter}";
-
-            // Send Fragmented MP4 stream to local Python backend TCP ingest socket
-            string outputArgs = $"-f mp4 -movflags frag_keyframe+empty_moov+default_base_moof tcp://127.0.0.1:{ingestPort}";
-
-            string arguments = $"{inputArgs} {videoCodecArgs} {outputArgs}";
-
-            LogReceived?.Invoke($"Launching FFmpeg: {ffmpegExe} {arguments}");
-
             ProcessStartInfo startInfo = new ProcessStartInfo
             {
                 FileName = ffmpegExe,
-                Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
+
+            // Safely build ArgumentList to avoid unescaped window title quote breaking the process
+            startInfo.ArgumentList.Add("-f");
+            startInfo.ArgumentList.Add("gdigrab");
+            startInfo.ArgumentList.Add("-framerate");
+            startInfo.ArgumentList.Add(profile.Framerate.ToString());
+
+            if (targetSource.StartsWith("window="))
+            {
+                string windowTitle = targetSource.Substring("window=".Length);
+                startInfo.ArgumentList.Add("-i");
+                startInfo.ArgumentList.Add($"title={windowTitle}");
+            }
+            else
+            {
+                startInfo.ArgumentList.Add("-draw_mouse");
+                startInfo.ArgumentList.Add("1");
+                startInfo.ArgumentList.Add("-i");
+                startInfo.ArgumentList.Add("desktop");
+            }
+
+            int bitrateKbps = profile.BitrateKbps;
+            int maxRateKbps = (int)(bitrateKbps * 1.2);
+            int bufSizeKbps = bitrateKbps * 2;
+            string codecProfile = profile.Codec == "libx265" ? "main" : profile.Profile;
+
+            startInfo.ArgumentList.Add("-c:v");
+            startInfo.ArgumentList.Add(profile.Codec);
+            startInfo.ArgumentList.Add("-preset");
+            startInfo.ArgumentList.Add(profile.Preset);
+            startInfo.ArgumentList.Add("-profile:v");
+            startInfo.ArgumentList.Add(codecProfile);
+            startInfo.ArgumentList.Add("-pix_fmt");
+            startInfo.ArgumentList.Add("yuv420p");
+            startInfo.ArgumentList.Add("-b:v");
+            startInfo.ArgumentList.Add($"{bitrateKbps}k");
+            startInfo.ArgumentList.Add("-maxrate");
+            startInfo.ArgumentList.Add($"{maxRateKbps}k");
+            startInfo.ArgumentList.Add("-bufsize");
+            startInfo.ArgumentList.Add($"{bufSizeKbps}k");
+            startInfo.ArgumentList.Add("-g");
+            startInfo.ArgumentList.Add((profile.Framerate * 2).ToString());
+
+            if (profile.Resolution == "1920x1080")
+            {
+                startInfo.ArgumentList.Add("-vf");
+                startInfo.ArgumentList.Add("scale=1920:1080:flags=lanczos");
+            }
+            else if (profile.Resolution == "3840x2160")
+            {
+                startInfo.ArgumentList.Add("-vf");
+                startInfo.ArgumentList.Add("scale=3840:2160:flags=lanczos");
+            }
+            else if (profile.Resolution == "1280x720")
+            {
+                startInfo.ArgumentList.Add("-vf");
+                startInfo.ArgumentList.Add("scale=1280:720:flags=lanczos");
+            }
+
+            startInfo.ArgumentList.Add("-f");
+            startInfo.ArgumentList.Add("mp4");
+            startInfo.ArgumentList.Add("-movflags");
+            startInfo.ArgumentList.Add("frag_keyframe+empty_moov+default_base_moof");
+            startInfo.ArgumentList.Add($"tcp://127.0.0.1:{ingestPort}");
+
+            LogReceived?.Invoke($"Launching FFmpeg with {startInfo.ArgumentList.Count} arguments targeting tcp://127.0.0.1:{ingestPort}");
 
             try
             {
@@ -146,9 +167,16 @@ namespace CastDesktop.Services
 
         private void ParseFFmpegLog(string line)
         {
-            // Parse line for stats: fps= 60 bitrate=34500.2kbits/s
             try
             {
+                // Check for screen capture permission denied logs in Windows / gdigrab
+                string lower = line.ToLower();
+                if (lower.Contains("permission denied") || lower.Contains("access is denied") ||
+                    lower.Contains("cannot open display") || lower.Contains("gdigrab: graphics device interface error"))
+                {
+                    PermissionErrorDetected?.Invoke("Permiso de captura de pantalla denegado por Windows o dispositivo gráfico restringido. Verifica la configuración de Privacidad y Seguridad en Windows (Privacidad > Captura de pantalla/Grabación) y ejecuta la aplicación como Administrador.");
+                }
+
                 Match fpsMatch = Regex.Match(line, @"fps=\s*([\d\.]+)");
                 Match bitrateMatch = Regex.Match(line, @"bitrate=\s*([\d\.]+)kbits/s");
 
@@ -167,14 +195,12 @@ namespace CastDesktop.Services
 
         private string FindFFmpegExecutable()
         {
-            // Check PATH or current directory
             string exeName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
 
             if (File.Exists(exeName)) return Path.GetFullPath(exeName);
             if (File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, exeName)))
                 return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, exeName);
 
-            // Search in PATH
             string? pathEnv = Environment.GetEnvironmentVariable("PATH");
             if (pathEnv != null)
             {
@@ -185,7 +211,7 @@ namespace CastDesktop.Services
                 }
             }
 
-            return "ffmpeg"; // Fallback to executable name
+            return "ffmpeg";
         }
 
         private string GetLocalIPAddress()

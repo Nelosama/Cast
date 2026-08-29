@@ -1,0 +1,18 @@
+# Build and Release Directories
+bin/
+obj/
+*.user
+*.userosscache
+*.sln.docstates
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE & Editor files
+.vscode/
+.vs/
+*.suo
+*.user

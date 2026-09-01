@@ -1,0 +1,70 @@
+name: Build Installer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download FFmpeg
+        shell: powershell
+        run: |
+          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          Invoke-WebRequest -Uri $ffmpegUrl -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_temp"
+          $ffmpegExe = Get-ChildItem -Path "ffmpeg_temp" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName -Destination "ffmpeg.exe"
+          Remove-Item -Recurse -Force "ffmpeg_temp", "ffmpeg.zip"
+
+      - name: Publish CastDesktop (.NET WPF win-x64)
+        run: |
+          dotnet publish src/CastDesktop/CastDesktop.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeAllContentForSelfExtract=true -p:EnableCompressionInSingleFile=true
+
+      - name: Copy FFmpeg to Publish Directory
+        shell: powershell
+        run: |
+          $publishDir = "src/CastDesktop/bin/Release/net8.0-windows/win-x64/publish"
+          Copy-Item "ffmpeg.exe" -Destination "$publishDir/ffmpeg.exe" -Force
+
+      - name: Install Inno Setup and Build Installer
+        shell: powershell
+        run: |
+          choco install innosetup -y
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/setup.iss
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CastDesktop_Setup
+          path: installer/CastDesktop_Setup.exe
+
+      - name: Create or Update Release (main branch only)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: CastDesktop HD Latest Release
+          body: |
+            Instalador automático compilado desde la rama main.
+            Descarga `CastDesktop_Setup.exe` a continuación.
+          draft: false
+          prerelease: false
+          files: installer/CastDesktop_Setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

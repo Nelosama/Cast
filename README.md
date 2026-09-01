@@ -26,9 +26,11 @@ Aplicación de escritorio para Windows desarrollada en C# (.NET 8 WPF) que permi
 
 ---
 
-## 📦 Instalación (Paso Único)
+## 📦 Instalación
 
-1. Descarga el instalador `CastDesktop_Setup.exe`.
+Ya no hace falta compilar nada manualmente. El instalador ejecutable siempre está disponible y actualizado automáticamente tras cada cambio:
+
+1. Ve a la pestaña **Releases** de este repositorio en GitHub y descarga la última versión de `CastDesktop_Setup.exe`.
 2. Ejecuta el instalador y sigue los pasos en pantalla.
 3. ¡Listo! Abre **CastDesktop HD** desde el acceso directo del Menú Inicio o Escritorio y comienza a transmitir.
 
@@ -36,9 +38,19 @@ Aplicación de escritorio para Windows desarrollada en C# (.NET 8 WPF) que permi
 
 ---
 
-## 🛠️ Compilación desde el Código Fuente
+## ⚙️ Automatización e Integración Continua (CI/CD)
 
-Si deseas compilar la aplicación desde el código fuente:
+El proyecto cuenta con una GitHub Action (`.github/workflows/build-installer.yml`) que automatiza el proceso completo de compilación en un entorno `windows-latest`:
+- Descarga automáticamente FFmpeg (build essentials de gyan.dev).
+- Publica el proyecto WPF en modo autocontenido single-file (`win-x64`).
+- Empaqueta la aplicación usando Inno Setup para generar `CastDesktop_Setup.exe`.
+- Publica automáticamente el instalador en los **Releases** de GitHub en cada cambio enviado a la rama `main` o ejecutado manualmente (`workflow_dispatch`).
+
+---
+
+## 🛠️ Compilación Manual desde el Código Fuente (Opcional)
+
+Si deseas compilar la aplicación localmente en tu equipo:
 
 ### Requisitos
 - Windows 10 / Windows 11 (64-bit).

@@ -139,7 +139,8 @@ namespace CastDesktop.Services
 
                 var receiver = new ChromecastReceiver
                 {
-                    DeviceUri = new Uri($"https://{device.Host}:{device.Port}")
+                    DeviceUri = new Uri($"https://{device.Host}:{device.Port}"),
+                    Port = device.Port
                 };
 
                 await _client.ConnectChromecast(receiver);
@@ -301,7 +302,8 @@ namespace CastDesktop.Services
 
                         var receiver = new ChromecastReceiver
                         {
-                            DeviceUri = new Uri($"https://{CurrentDevice.Host}:{CurrentDevice.Port}")
+                            DeviceUri = new Uri($"https://{CurrentDevice.Host}:{CurrentDevice.Port}"),
+                            Port = CurrentDevice.Port
                         };
 
                         await _client.ConnectChromecast(receiver);

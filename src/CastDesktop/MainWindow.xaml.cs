@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -20,10 +22,28 @@ namespace CastDesktop
 
         private List<CastDevice> _devices = new();
         private bool _isStreaming = false;
+        private bool _isInitialized = false;
 
         public MainWindow()
         {
-            InitializeComponent();
+            try
+            {
+                InitializeComponent();
+            }
+            catch (Exception ex)
+            {
+                Exception actualEx = ex.InnerException ?? ex;
+                string errorLog = $"[XAML Init Exception] Type: {actualEx.GetType().FullName}\nMessage: {actualEx.Message}\nStackTrace:\n{actualEx.StackTrace}";
+                Debug.WriteLine(errorLog);
+                try
+                {
+                    File.WriteAllText("xaml_init_error.log", errorLog);
+                }
+                catch { }
+                MessageBox.Show($"Error durante la inicialización de XAML:\n\n{actualEx.GetType().Name}: {actualEx.Message}\n\nUbicación:\n{actualEx.StackTrace}",
+                                "Error de Inicialización XAML", MessageBoxButton.OK, MessageBoxImage.Error);
+                throw;
+            }
 
             _chromecastService = new ChromecastService();
             _httpStreamServer = new HttpStreamServer();
@@ -52,10 +72,15 @@ namespace CastDesktop
 
         private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            _isInitialized = true;
+
             AppendLog("Iniciando CastDesktop HD (Modo Nativo C# / Sin Python)...");
 
             _httpStreamServer.Start(5000, 8088);
-            TxtBackendState.Text = $"Backend C#: Activo ({_chromecastService.GetLocalIPAddress()}:5000)";
+            if (TxtBackendState != null)
+            {
+                TxtBackendState.Text = $"Backend C#: Activo ({_chromecastService.GetLocalIPAddress()}:5000)";
+            }
 
             _chromecastService.StartDiscovery();
             CheckBandwidthAsync();
@@ -64,19 +89,21 @@ namespace CastDesktop
 
         private void MainWindow_Closed(object? sender, EventArgs e)
         {
-            _telemetryTimer.Stop();
-            _ffmpegService.StopStreaming();
-            _chromecastService.StopDiscovery();
-            _httpStreamServer.Stop();
+            _telemetryTimer?.Stop();
+            _ffmpegService?.StopStreaming();
+            _chromecastService?.StopDiscovery();
+            _httpStreamServer?.Stop();
         }
 
         private void OnDevicesDiscovered(List<CastDevice> devices)
         {
             Dispatcher.Invoke(() =>
             {
+                if (CmbDevices == null) return;
+
                 var previouslySelected = CmbDevices.SelectedItem as CastDevice;
 
-                _devices = devices;
+                _devices = devices ?? new List<CastDevice>();
                 CmbDevices.ItemsSource = null;
                 CmbDevices.ItemsSource = _devices;
 
@@ -106,6 +133,9 @@ namespace CastDesktop
         {
             Dispatcher.Invoke(() =>
             {
+                if (TxtStatusState == null || BtnStartStop == null || BtnReconnect == null || TxtStatusFps == null || TxtStatusBitrate == null)
+                    return;
+
                 if (isCasting)
                 {
                     string msg = !string.IsNullOrEmpty(statusMessage) ? statusMessage : "Transmitiendo";
@@ -123,7 +153,7 @@ namespace CastDesktop
                 else
                 {
                     _isStreaming = false;
-                    _ffmpegService.StopStreaming();
+                    _ffmpegService?.StopStreaming();
 
                     BtnStartStop.Content = "▶ INICIAR TRANSMISIÓN";
                     BtnStartStop.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4CAF50"));
@@ -139,8 +169,14 @@ namespace CastDesktop
 
         private Task CheckBandwidthAsync()
         {
-            var status = NetworkService.CheckNetworkSpeed(SelectedQualityProfile.BitrateKbps);
-            if (!string.IsNullOrEmpty(status.WarningMessage))
+            if (!_isInitialized || BorderWarning == null || TxtWarningMessage == null)
+                return Task.CompletedTask;
+
+            QualityProfile profile = SelectedQualityProfile;
+            if (profile == null) return Task.CompletedTask;
+
+            var status = NetworkService.CheckNetworkSpeed(profile.BitrateKbps);
+            if (status != null && !string.IsNullOrEmpty(status.WarningMessage))
             {
                 BorderWarning.Visibility = Visibility.Visible;
                 TxtWarningMessage.Text = status.WarningMessage;
@@ -165,13 +201,13 @@ namespace CastDesktop
         private void BtnRefreshDevices_Click(object sender, RoutedEventArgs e)
         {
             AppendLog("Buscando dispositivos Chromecast en la red local vía mDNS...");
-            _chromecastService.StartDiscovery();
+            _chromecastService?.StartDiscovery();
             CheckBandwidthAsync();
         }
 
         private void CmbSourceType_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (TxtWindowTitle == null || LblWindowTitle == null) return;
+            if (CmbSourceType == null || TxtWindowTitle == null || LblWindowTitle == null) return;
 
             if (CmbSourceType.SelectedIndex == 1) // Window
             {
@@ -187,7 +223,7 @@ namespace CastDesktop
 
         private void CmbQualityPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (GridCustomQuality == null) return;
+            if (GridCustomQuality == null || CmbQualityPreset == null) return;
 
             if (CmbQualityPreset.SelectedIndex == 3) // Custom
             {
@@ -200,11 +236,15 @@ namespace CastDesktop
                 GridCustomQuality.Opacity = 0.5;
             }
 
-            CheckBandwidthAsync();
+            if (_isInitialized)
+            {
+                CheckBandwidthAsync();
+            }
         }
 
         private void CustomSetting_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
+            if (!_isInitialized || SldFps == null || SldBitrate == null || CmbQualityPreset == null) return;
             CheckBandwidthAsync();
         }
 
@@ -212,20 +252,25 @@ namespace CastDesktop
         {
             get
             {
+                if (CmbQualityPreset == null) return QualityProfile.HighQuality;
+
                 switch (CmbQualityPreset.SelectedIndex)
                 {
                     case 0: return QualityProfile.HighQuality;
                     case 1: return QualityProfile.MediumQuality;
                     case 2: return QualityProfile.LowQuality;
                     case 3:
+                        int fps = SldFps != null ? (int)SldFps.Value : 60;
+                        int bitrate = SldBitrate != null ? (int)SldBitrate.Value * 1000 : 35000;
+                        string codec = (CmbCodec != null && CmbCodec.SelectedIndex == 1) ? "libx265" : "libx264";
                         return new QualityProfile
                         {
                             Name = "Personalizada",
                             Resolution = "Native",
-                            Framerate = (int)SldFps.Value,
-                            BitrateKbps = (int)SldBitrate.Value * 1000,
+                            Framerate = fps,
+                            BitrateKbps = bitrate,
                             Preset = "medium",
-                            Codec = CmbCodec.SelectedIndex == 1 ? "libx265" : "libx264",
+                            Codec = codec,
                             Profile = "high"
                         };
                     default: return QualityProfile.HighQuality;
@@ -247,6 +292,8 @@ namespace CastDesktop
 
         private async Task StartTransmissionAsync()
         {
+            if (CmbDevices == null) return;
+
             var selectedDevice = CmbDevices.SelectedItem as CastDevice;
             if (selectedDevice == null)
             {
@@ -258,9 +305,9 @@ namespace CastDesktop
             AppendLog($"Iniciando captura con perfil: {profile.Name} ({profile.Framerate} FPS, {profile.BitrateKbps / 1000} Mbps)");
 
             string source = "desktop";
-            if (CmbSourceType.SelectedIndex == 1)
+            if (CmbSourceType != null && CmbSourceType.SelectedIndex == 1)
             {
-                string title = TxtWindowTitle.Text.Trim();
+                string title = TxtWindowTitle != null ? TxtWindowTitle.Text.Trim() : "";
                 if (string.IsNullOrEmpty(title))
                 {
                     MessageBox.Show("Por favor ingresa el título de la ventana a capturar.", "Ventana no especificada", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -283,12 +330,18 @@ namespace CastDesktop
             if (success)
             {
                 _isStreaming = true;
-                BtnStartStop.Content = "⏹ DETENER TRANSMISIÓN";
-                BtnStartStop.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#D32F2F"));
-                BtnReconnect.IsEnabled = true;
+                if (BtnStartStop != null)
+                {
+                    BtnStartStop.Content = "⏹ DETENER TRANSMISIÓN";
+                    BtnStartStop.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#D32F2F"));
+                }
+                if (BtnReconnect != null) BtnReconnect.IsEnabled = true;
 
-                TxtStatusState.Text = "Transmitiendo";
-                TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#388E3C"));
+                if (TxtStatusState != null)
+                {
+                    TxtStatusState.Text = "Transmitiendo";
+                    TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#388E3C"));
+                }
 
                 AppendLog($"Transmisión iniciada correctamente hacia {selectedDevice.Name}");
             }
@@ -303,24 +356,34 @@ namespace CastDesktop
         private async Task StopTransmissionAsync()
         {
             AppendLog("Deteniendo transmisión...");
-            _ffmpegService.StopStreaming();
-            await _chromecastService.StopCastAsync();
+            _ffmpegService?.StopStreaming();
+            if (_chromecastService != null)
+            {
+                await _chromecastService.StopCastAsync();
+            }
 
             _isStreaming = false;
-            BtnStartStop.Content = "▶ INICIAR TRANSMISIÓN";
-            BtnStartStop.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4CAF50"));
-            BtnReconnect.IsEnabled = false;
+            if (BtnStartStop != null)
+            {
+                BtnStartStop.Content = "▶ INICIAR TRANSMISIÓN";
+                BtnStartStop.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4CAF50"));
+            }
+            if (BtnReconnect != null) BtnReconnect.IsEnabled = false;
 
-            TxtStatusState.Text = "Detenido";
-            TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#C62828"));
-            TxtStatusFps.Text = "0.0 FPS";
-            TxtStatusBitrate.Text = "0 Kbps";
+            if (TxtStatusState != null)
+            {
+                TxtStatusState.Text = "Detenido";
+                TxtStatusState.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#C62828"));
+            }
+            if (TxtStatusFps != null) TxtStatusFps.Text = "0.0 FPS";
+            if (TxtStatusBitrate != null) TxtStatusBitrate.Text = "0 Kbps";
 
             AppendLog("Transmisión detenida.");
         }
 
         private async void BtnReconnect_Click(object sender, RoutedEventArgs e)
         {
+            if (CmbDevices == null) return;
             var selectedDevice = CmbDevices.SelectedItem as CastDevice;
             if (selectedDevice == null || !_isStreaming) return;
 
@@ -338,7 +401,10 @@ namespace CastDesktop
 
         private void TelemetryTimer_Tick(object? sender, EventArgs e)
         {
-            TxtBackendState.Text = $"Backend C#: Activo ({_chromecastService.GetLocalIPAddress()}:5000)";
+            if (TxtBackendState != null && _chromecastService != null)
+            {
+                TxtBackendState.Text = $"Backend C#: Activo ({_chromecastService.GetLocalIPAddress()}:5000)";
+            }
         }
 
         private void OnFFmpegLogReceived(string log)
@@ -350,8 +416,8 @@ namespace CastDesktop
         {
             Dispatcher.Invoke(() =>
             {
-                TxtStatusFps.Text = $"{fps:F1} FPS";
-                TxtStatusBitrate.Text = $"{bitrateKbps:N0} Kbps";
+                if (TxtStatusFps != null) TxtStatusFps.Text = $"{fps:F1} FPS";
+                if (TxtStatusBitrate != null) TxtStatusBitrate.Text = $"{bitrateKbps:N0} Kbps";
             });
         }
 
@@ -369,9 +435,13 @@ namespace CastDesktop
 
         private void AppendLog(string message)
         {
+            if (TxtLogs == null) return;
             string time = DateTime.Now.ToString("HH:mm:ss");
             TxtLogs.AppendText($"[{time}] {message}\n");
-            ScrollLogs.ScrollToEnd();
+            if (ScrollLogs != null)
+            {
+                ScrollLogs.ScrollToEnd();
+            }
         }
     }
 }

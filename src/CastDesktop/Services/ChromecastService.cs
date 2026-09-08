@@ -66,15 +66,34 @@ namespace CastDesktop.Services
                         string friendlyName = result.DisplayName ?? "Chromecast";
                         string model = "Chromecast";
 
-                        if (result.Services.TryGetValue("_googlecast._tcp.local.", out var service))
+                        var serviceKeys = string.Join(", ", result.Services.Keys);
+                        var txtDetails = new List<string>();
+
+                        foreach (var s in result.Services)
                         {
-                            port = service.Port;
-                            foreach (var txt in service.Properties)
+                            if (s.Value.Port > 0)
                             {
-                                if (txt.ContainsKey("fn")) friendlyName = txt["fn"];
-                                if (txt.ContainsKey("md")) model = txt["md"];
+                                port = s.Value.Port;
+                            }
+
+                            foreach (var dict in s.Value.Properties)
+                            {
+                                foreach (var kvp in dict)
+                                {
+                                    txtDetails.Add($"{s.Key}->{kvp.Key}={kvp.Value}");
+                                    if (kvp.Key.Equals("fn", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
+                                    {
+                                        friendlyName = kvp.Value;
+                                    }
+                                    if (kvp.Key.Equals("md", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
+                                    {
+                                        model = kvp.Value;
+                                    }
+                                }
                             }
                         }
+
+                        LogReceived?.Invoke($"[mDNS Diagnostics] Discovered Host: {host}, DisplayName: '{result.DisplayName}', Id: '{result.Id}', ServiceKeys: [{serviceKeys}], TXT Properties: [{string.Join("; ", txtDetails)}]");
 
                         bool is4k = (model + " " + friendlyName).ToLower().Contains("ultra") ||
                                     (model + " " + friendlyName).ToLower().Contains("4k") ||

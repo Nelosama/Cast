@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using CastDesktop.Models;
@@ -63,15 +66,34 @@ namespace CastDesktop.Services
                         string friendlyName = result.DisplayName ?? "Chromecast";
                         string model = "Chromecast";
 
-                        if (result.Services.TryGetValue("_googlecast._tcp.local.", out var service))
+                        var serviceKeys = string.Join(", ", result.Services.Keys);
+                        var txtDetails = new List<string>();
+
+                        foreach (var s in result.Services)
                         {
-                            port = service.Port;
-                            foreach (var txt in service.Properties)
+                            if (s.Value.Port > 0)
                             {
-                                if (txt.ContainsKey("fn")) friendlyName = txt["fn"];
-                                if (txt.ContainsKey("md")) model = txt["md"];
+                                port = s.Value.Port;
+                            }
+
+                            foreach (var dict in s.Value.Properties)
+                            {
+                                foreach (var kvp in dict)
+                                {
+                                    txtDetails.Add($"{s.Key}->{kvp.Key}={kvp.Value}");
+                                    if (kvp.Key.Equals("fn", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
+                                    {
+                                        friendlyName = kvp.Value;
+                                    }
+                                    if (kvp.Key.Equals("md", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
+                                    {
+                                        model = kvp.Value;
+                                    }
+                                }
                             }
                         }
+
+                        LogReceived?.Invoke($"[mDNS Diagnostics] Discovered Host: {host}, DisplayName: '{result.DisplayName}', Id: '{result.Id}', ServiceKeys: [{serviceKeys}], TXT Properties: [{string.Join("; ", txtDetails)}]");
 
                         bool is4k = (model + " " + friendlyName).ToLower().Contains("ultra") ||
                                     (model + " " + friendlyName).ToLower().Contains("4k") ||
@@ -132,9 +154,12 @@ namespace CastDesktop.Services
                 _client = new ChromecastClient();
                 AttachClientEvents(_client);
 
+                LogLocalNetworkInterfaces();
+
                 var receiver = new ChromecastReceiver
                 {
-                    DeviceUri = new Uri($"https://{device.Host}:{device.Port}")
+                    DeviceUri = new Uri($"https://{device.Host}:{device.Port}"),
+                    Port = device.Port
                 };
 
                 await _client.ConnectChromecast(receiver);
@@ -166,7 +191,8 @@ namespace CastDesktop.Services
             {
                 IsCasting = false;
                 StatusChanged?.Invoke(false, ex.Message);
-                LogReceived?.Invoke($"[ChromecastService] Error al iniciar transmisión: {ex.Message}");
+                string details = FormatExceptionDetails(ex);
+                LogReceived?.Invoke($"[ChromecastService] Error al iniciar transmisión:\n{details}");
                 return (false, ex.Message);
             }
         }
@@ -291,9 +317,12 @@ namespace CastDesktop.Services
                         _client = new ChromecastClient();
                         AttachClientEvents(_client);
 
+                        LogLocalNetworkInterfaces();
+
                         var receiver = new ChromecastReceiver
                         {
-                            DeviceUri = new Uri($"https://{CurrentDevice.Host}:{CurrentDevice.Port}")
+                            DeviceUri = new Uri($"https://{CurrentDevice.Host}:{CurrentDevice.Port}"),
+                            Port = CurrentDevice.Port
                         };
 
                         await _client.ConnectChromecast(receiver);
@@ -316,7 +345,8 @@ namespace CastDesktop.Services
                     }
                     catch (Exception ex)
                     {
-                        LogReceived?.Invoke($"[ChromecastService] Fallo en intento {attempt}/{maxAttempts} de reconexión: {ex.Message}");
+                        string details = FormatExceptionDetails(ex);
+                        LogReceived?.Invoke($"[ChromecastService] Fallo en intento {attempt}/{maxAttempts} de reconexión:\n{details}");
                         if (attempt < maxAttempts)
                         {
                             await Task.Delay(2000);
@@ -378,6 +408,58 @@ namespace CastDesktop.Services
             {
                 return "127.0.0.1";
             }
+        }
+
+        private void LogLocalNetworkInterfaces()
+        {
+            try
+            {
+                var localIps = new List<string>();
+                var hostName = Dns.GetHostName();
+                var addresses = Dns.GetHostAddresses(hostName);
+                foreach (var ip in addresses)
+                {
+                    if (ip.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        localIps.Add(ip.ToString());
+                    }
+                }
+
+                var activeInterfaces = new List<string>();
+                foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus == OperationalStatus.Up &&
+                        ni.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                    {
+                        var ipProps = ni.GetIPProperties();
+                        var unicast = ipProps.UnicastAddresses
+                            .Where(u => u.Address.AddressFamily == AddressFamily.InterNetwork)
+                            .Select(u => u.Address.ToString());
+                        activeInterfaces.Add($"{ni.Name} ({ni.NetworkInterfaceType}): [{string.Join(", ", unicast)}]");
+                    }
+                }
+
+                LogReceived?.Invoke($"[ChromecastService] Diagnóstico Interfaces Locales -> IPs DNS: {string.Join(", ", localIps)} | Adaptadores Activos: {string.Join("; ", activeInterfaces)}");
+            }
+            catch (Exception ex)
+            {
+                LogReceived?.Invoke($"[ChromecastService] No se pudo obtener diagnóstico de red: {ex.Message}");
+            }
+        }
+
+        private string FormatExceptionDetails(Exception ex)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Tipo: {ex.GetType().FullName}");
+            sb.AppendLine($"Mensaje: {ex.Message}");
+            sb.AppendLine($"StackTrace:\n{ex.StackTrace}");
+            if (ex.InnerException != null)
+            {
+                sb.AppendLine($"InnerException Tipo: {ex.InnerException.GetType().FullName}");
+                sb.AppendLine($"InnerException Mensaje: {ex.InnerException.Message}");
+                sb.AppendLine($"InnerException StackTrace:\n{ex.InnerException.StackTrace}");
+            }
+            return sb.ToString().TrimEnd();
         }
     }
 }

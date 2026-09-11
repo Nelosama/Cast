@@ -25,6 +25,8 @@ namespace CastDesktop.Services
         private readonly List<CastDevice> _discoveredDevices = new();
         private readonly object _devicesLock = new();
         private volatile bool _isUserStopping = false;
+        private DateTime _lastLoadTime = DateTime.MinValue;
+        private DateTime _lastReconnectAttemptTime = DateTime.MinValue;
 
         public event Action<List<CastDevice>>? DevicesDiscovered;
         public event Action<string>? LogReceived;
@@ -415,6 +417,7 @@ namespace CastDesktop.Services
                 };
 
                 await _client.MediaChannel.LoadAsync(media);
+                _lastLoadTime = DateTime.UtcNow;
 
                 IsCasting = true;
                 CurrentDevice = device;
@@ -459,8 +462,24 @@ namespace CastDesktop.Services
         {
             if (IsCasting && !_isUserStopping && status != null && status.PlayerState == PlayerStateType.Idle)
             {
-                LogReceived?.Invoke("[ChromecastService] Estado de reproductor pasó a IDLE inesperadamente.");
-                Task.Run(() => TryAutoReconnectAsync());
+                string idleReason = status.IdleReason ?? "NULO";
+                LogReceived?.Invoke($"[ChromecastService] Estado de reproductor pasó a IDLE (Motivo: {idleReason}).");
+
+                if ((DateTime.UtcNow - _lastLoadTime).TotalSeconds < 5)
+                {
+                    LogReceived?.Invoke("[ChromecastService] Estado IDLE ignorado por periodo de gracia tras la carga inicial/reconexión.");
+                    return;
+                }
+
+                if (string.Equals(status.IdleReason, "ERROR", StringComparison.OrdinalIgnoreCase))
+                {
+                    LogReceived?.Invoke("[ChromecastService] Estado IDLE con motivo ERROR detectado. Iniciando reconexión...");
+                    Task.Run(() => TryAutoReconnectAsync());
+                }
+                else
+                {
+                    LogReceived?.Invoke($"[ChromecastService] Estado IDLE con motivo '{idleReason}' es normal/no crítico. No se reconecta.");
+                }
             }
         }
 
@@ -498,14 +517,29 @@ namespace CastDesktop.Services
                         try
                         {
                             var status = await _client.MediaChannel.GetMediaStatusAsync();
-                            if (status == null || status.PlayerState == PlayerStateType.Idle)
+                            bool inGracePeriod = (DateTime.UtcNow - _lastLoadTime).TotalSeconds < 5;
+
+                            if (status == null)
                             {
-                                shouldReconnect = true;
+                                if (!inGracePeriod)
+                                {
+                                    shouldReconnect = true;
+                                }
+                            }
+                            else if (status.PlayerState == PlayerStateType.Idle)
+                            {
+                                if (!inGracePeriod && string.Equals(status.IdleReason, "ERROR", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    shouldReconnect = true;
+                                }
                             }
                         }
                         catch
                         {
-                            shouldReconnect = true;
+                            if ((DateTime.UtcNow - _lastLoadTime).TotalSeconds >= 5)
+                            {
+                                shouldReconnect = true;
+                            }
                         }
                     }
 
@@ -528,12 +562,20 @@ namespace CastDesktop.Services
 
         private async Task TryAutoReconnectAsync()
         {
+            if ((DateTime.UtcNow - _lastReconnectAttemptTime).TotalSeconds < 5)
+            {
+                LogReceived?.Invoke("[ChromecastService] Intento de reconexión ignorado por debounce/cooldown (< 5s).");
+                return;
+            }
+
             if (!_reconnectSemaphore.Wait(0)) return;
 
             try
             {
                 if (!IsCasting || _isUserStopping || CurrentDevice == null || string.IsNullOrEmpty(ActiveStreamUrl))
                     return;
+
+                _lastReconnectAttemptTime = DateTime.UtcNow;
 
                 const int maxAttempts = 3;
                 bool reconnected = false;
@@ -576,6 +618,7 @@ namespace CastDesktop.Services
                         };
 
                         await _client.MediaChannel.LoadAsync(media);
+                        _lastLoadTime = DateTime.UtcNow;
 
                         reconnected = true;
                         IsCasting = true;
@@ -624,7 +667,15 @@ namespace CastDesktop.Services
             }
             catch (Exception ex)
             {
-                LogReceived?.Invoke($"[ChromecastService] Error al detener transmisión: {ex.Message}");
+                if (ex.Message.Contains("Client disconnected before receiving response", StringComparison.OrdinalIgnoreCase) ||
+                    (ex.InnerException?.Message.Contains("Client disconnected before receiving response", StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    LogReceived?.Invoke("[ChromecastService] Transmisión detenida correctamente (desconexión del cliente antes de respuesta tratada como cierre exitoso).");
+                }
+                else
+                {
+                    LogReceived?.Invoke($"[ChromecastService] Error al detener transmisión: {ex.Message}");
+                }
             }
             finally
             {

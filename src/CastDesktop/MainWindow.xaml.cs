@@ -200,8 +200,8 @@ namespace CastDesktop
 
         private void BtnRefreshDevices_Click(object sender, RoutedEventArgs e)
         {
-            AppendLog("Buscando dispositivos Chromecast en la red local vía mDNS...");
-            _chromecastService?.StartDiscovery();
+            AppendLog("Buscando dispositivos Chromecast en la red local vía mDNS + SSDP...");
+            _chromecastService?.ForceDiscoveryNow();
             CheckBandwidthAsync();
         }
 
@@ -435,6 +435,11 @@ namespace CastDesktop
 
         private void AppendLog(string message)
         {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(() => AppendLog(message));
+                return;
+            }
             if (TxtLogs == null) return;
             string time = DateTime.Now.ToString("HH:mm:ss");
             TxtLogs.AppendText($"[{time}] {message}\n");

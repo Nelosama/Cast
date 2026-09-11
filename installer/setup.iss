@@ -20,6 +20,7 @@ OutputBaseFilename=CastDesktop_Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+PrivilegesRequired=admin
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -39,4 +40,9 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""CastDesktop HD"" dir=in action=allow program=""{app}\CastDesktop.exe"" enable=yes profile=private"; Flags: runhidden
+Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""CastDesktop HD"" dir=out action=allow program=""{app}\CastDesktop.exe"" enable=yes profile=private"; Flags: runhidden
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""CastDesktop HD"""; Flags: runhidden

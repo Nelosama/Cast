@@ -1,0 +1,30 @@
+[9/10/2026 9:21:18 PM] [DispatcherUnhandledException] Type: System.InvalidOperationException
+Message: No process is associated with this object.
+StackTrace:
+   at System.Diagnostics.Process.EnsureState(State state)
+   at System.Diagnostics.Process.get_HasExited()
+   at CastDesktop.Services.FFmpegService.StopStreaming() in C:\Users\Nelo\Documents\GitHub\Cast\src\CastDesktop\Services\FFmpegService.cs:line 150
+   at CastDesktop.MainWindow.MainWindow_Closed(Object sender, EventArgs e) in C:\Users\Nelo\Documents\GitHub\Cast\src\CastDesktop\MainWindow.xaml.cs:line 93
+   at System.Windows.Window.WmDestroy()
+   at System.Windows.Window.WindowFilterMessage(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at System.Windows.Interop.HwndSource.PublicHooksFilterMessage(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at MS.Win32.HwndWrapper.WndProc(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at System.Windows.Threading.ExceptionWrapper.InternalRealCall(Delegate callback, Object args, Int32 numArgs)
+   at System.Windows.Threading.ExceptionWrapper.TryCatchWhen(Object source, Delegate callback, Object args, Int32 numArgs, Delegate catchHandler)
+
+[9/10/2026 9:21:18 PM] [UnhandledException] Type: System.InvalidOperationException
+Message: No process is associated with this object.
+StackTrace:
+   at System.Diagnostics.Process.EnsureState(State state)
+   at System.Diagnostics.Process.get_HasExited()
+   at CastDesktop.Services.FFmpegService.StopStreaming() in C:\Users\Nelo\Documents\GitHub\Cast\src\CastDesktop\Services\FFmpegService.cs:line 150
+   at CastDesktop.MainWindow.MainWindow_Closed(Object sender, EventArgs e) in C:\Users\Nelo\Documents\GitHub\Cast\src\CastDesktop\MainWindow.xaml.cs:line 93
+   at System.Windows.Window.WmDestroy()
+   at System.Windows.Window.WindowFilterMessage(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at System.Windows.Interop.HwndSource.PublicHooksFilterMessage(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at MS.Win32.HwndWrapper.WndProc(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam, Boolean& handled)
+   at System.Windows.Threading.ExceptionWrapper.InternalRealCall(Delegate callback, Object args, Int32 numArgs)
+   at System.Windows.Threading.ExceptionWrapper.TryCatchWhen(Object source, Delegate callback, Object args, Int32 numArgs, Delegate catchHandler)
+   at System.Windows.Threading.Dispatcher.LegacyInvokeImpl(DispatcherPriority priority, TimeSpan timeout, Delegate method, Object args, Int32 numArgs)
+   at MS.Win32.HwndSubclass.SubclassWndProc(IntPtr hwnd, Int32 msg, IntPtr wParam, IntPtr lParam)
+

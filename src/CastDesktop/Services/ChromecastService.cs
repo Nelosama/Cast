@@ -49,13 +49,108 @@ namespace CastDesktop.Services
             _discoveryCts = null;
         }
 
+        /// <summary>
+        /// Forces an immediate discovery scan using both mDNS and SSDP in parallel.
+        /// Called when the user clicks the "Buscar" button.
+        /// </summary>
+        public void ForceDiscoveryNow()
+        {
+            // Restart background loop
+            StopDiscovery();
+            _discoveryCts = new CancellationTokenSource();
+            var ct = _discoveryCts.Token;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    LogReceived?.Invoke("[ChromecastService] Búsqueda forzada: ejecutando mDNS + SSDP en paralelo...");
+
+                    // Run mDNS and SSDP simultaneously
+                    var mDnsTask = ZeroconfResolver.ResolveAsync("_googlecast._tcp.local.", scanTime: TimeSpan.FromSeconds(3), retries: 2, retryDelayMilliseconds: 500, callback: null, cancellationToken: ct);
+                    var ssdpTask = DiscoverSsdpDevicesAsync(ct);
+
+                    await Task.WhenAll(mDnsTask, ssdpTask);
+
+                    var newDevices = new List<CastDevice>();
+
+                    // Process mDNS results
+                    var mDnsResults = await mDnsTask;
+                    foreach (var result in mDnsResults)
+                    {
+                        string host = result.IPAddress;
+                        int port = 8009;
+                        string friendlyName = result.DisplayName ?? "Chromecast";
+                        string model = "Chromecast";
+
+                        foreach (var s in result.Services)
+                        {
+                            if (s.Value.Port > 0) port = s.Value.Port;
+                            foreach (var dict in s.Value.Properties)
+                            {
+                                foreach (var kvp in dict)
+                                {
+                                    if (kvp.Key.Equals("fn", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
+                                        friendlyName = kvp.Value;
+                                    if (kvp.Key.Equals("md", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
+                                        model = kvp.Value;
+                                }
+                            }
+                        }
+
+                        bool is4k = (model + " " + friendlyName).ToLower().Contains("ultra") ||
+                                    (model + " " + friendlyName).ToLower().Contains("4k") ||
+                                    (model + " " + friendlyName).ToLower().Contains("shield");
+
+                        newDevices.Add(new CastDevice
+                        {
+                            Name = friendlyName,
+                            ModelName = model,
+                            Host = host,
+                            Port = port,
+                            Is4k = is4k,
+                            Uuid = result.Id ?? Guid.NewGuid().ToString()
+                        });
+                        LogReceived?.Invoke($"[mDNS] Encontrado: '{friendlyName}' ({model}) en {host}:{port}");
+                    }
+
+                    // Add SSDP results (avoid duplicates by IP)
+                    var ssdpResults = await ssdpTask;
+                    foreach (var dev in ssdpResults)
+                    {
+                        if (!newDevices.Any(d => d.Host == dev.Host))
+                        {
+                            newDevices.Add(dev);
+                        }
+                    }
+
+                    LogReceived?.Invoke($"[ChromecastService] Búsqueda forzada completada: {newDevices.Count} dispositivo(s) encontrado(s).");
+
+                    lock (_devicesLock)
+                    {
+                        _discoveredDevices.Clear();
+                        _discoveredDevices.AddRange(newDevices);
+                    }
+
+                    DevicesDiscovered?.Invoke(newDevices);
+
+                    // Continue with normal background loop after this forced scan
+                    _ = BackgroundDiscoveryLoopAsync(ct);
+                }
+                catch (Exception ex)
+                {
+                    LogReceived?.Invoke($"[ChromecastService] Error en búsqueda forzada: {ex.Message}");
+                }
+            });
+        }
+
         private async Task BackgroundDiscoveryLoopAsync(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    var results = await ZeroconfResolver.ResolveAsync("_googlecast._tcp.local.", cancellationToken: ct);
+                    var results = await ZeroconfResolver.ResolveAsync("_googlecast._tcp.local.", scanTime: TimeSpan.FromSeconds(3), retries: 3, retryDelayMilliseconds: 1000, callback: null, cancellationToken: ct);
                     var newDevices = new List<CastDevice>();
 
                     foreach (var result in results)
@@ -110,6 +205,16 @@ namespace CastDesktop.Services
                         });
                     }
 
+                    if (newDevices.Count == 0)
+                    {
+                        LogReceived?.Invoke("[ChromecastService] mDNS no encontró dispositivos. Intentando fallback rápido con SSDP (DIAL)...");
+                        var ssdpDevices = await DiscoverSsdpDevicesAsync(ct);
+                        if (ssdpDevices.Count > 0)
+                        {
+                            newDevices.AddRange(ssdpDevices);
+                        }
+                    }
+
                     lock (_devicesLock)
                     {
                         _discoveredDevices.Clear();
@@ -136,6 +241,141 @@ namespace CastDesktop.Services
                     break;
                 }
             }
+        }
+
+        private async Task<List<CastDevice>> DiscoverSsdpDevicesAsync(CancellationToken ct)
+        {
+            var devices = new List<CastDevice>();
+            try
+            {
+                // Get all local IPv4 addresses from active network interfaces
+                var localIps = NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(n => n.OperationalStatus == OperationalStatus.Up &&
+                                n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                    .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(a => a.Address)
+                    .ToList();
+
+                LogReceived?.Invoke($"[ChromecastService] SSDP: Buscando en {localIps.Count} interfaces de red: {string.Join(", ", localIps)}");
+
+                var request = "M-SEARCH * HTTP/1.1\r\n" +
+                              "HOST: 239.255.255.250:1900\r\n" +
+                              "MAN: \"ssdp:discover\"\r\n" +
+                              "MX: 3\r\n" +
+                              "ST: urn:dial-multiscreen-org:service:dial:1\r\n" +
+                              "\r\n";
+                var requestBytes = Encoding.ASCII.GetBytes(request);
+                var multicastEndpoint = new IPEndPoint(IPAddress.Parse("239.255.255.250"), 1900);
+
+                // Search on each interface in parallel (key fix: bind to specific IP)
+                var tasks = localIps.Select(ip => SearchSsdpOnInterfaceAsync(ip, requestBytes, multicastEndpoint, ct)).ToList();
+                var results = await Task.WhenAll(tasks);
+
+                foreach (var list in results)
+                {
+                    foreach (var dev in list)
+                    {
+                        if (!devices.Any(d => d.Host == dev.Host))
+                        {
+                            devices.Add(dev);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogReceived?.Invoke($"[ChromecastService] Error en fallback SSDP: {ex.Message}");
+            }
+            return devices;
+        }
+
+        private async Task<List<CastDevice>> SearchSsdpOnInterfaceAsync(IPAddress localIp, byte[] requestBytes, IPEndPoint multicastEndpoint, CancellationToken ct)
+        {
+            var devices = new List<CastDevice>();
+            try
+            {
+                using var client = new UdpClient();
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                client.Client.Bind(new IPEndPoint(localIp, 0));
+
+                await client.SendAsync(requestBytes, requestBytes.Length, multicastEndpoint);
+
+                var timeoutTask = Task.Delay(4000, ct);
+
+                while (!ct.IsCancellationRequested)
+                {
+                    var receiveTask = client.ReceiveAsync();
+                    var completedTask = await Task.WhenAny(receiveTask, timeoutTask);
+
+                    if (completedTask == timeoutTask)
+                        break;
+
+                    var result = await receiveTask;
+                    var response = Encoding.ASCII.GetString(result.Buffer);
+
+                    if (response.Contains("LOCATION:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var ip = result.RemoteEndPoint.Address.ToString();
+                        if (devices.Any(d => d.Host == ip))
+                            continue;
+
+                        // Extract LOCATION URL to fetch device info
+                        string locationUrl = "";
+                        foreach (var line in response.Split('\n'))
+                        {
+                            if (line.TrimStart().StartsWith("LOCATION:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                locationUrl = line.Substring(line.IndexOf(':') + 1).Trim().TrimEnd('\r');
+                                break;
+                            }
+                        }
+
+                        // Fetch device-desc.xml to get friendly name
+                        string friendlyName = "Google TV (SSDP)";
+                        string modelName = "Google TV";
+                        string uuid = Guid.NewGuid().ToString();
+                        if (!string.IsNullOrEmpty(locationUrl))
+                        {
+                            try
+                            {
+                                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                                var xml = await http.GetStringAsync(locationUrl, ct);
+
+                                var fnMatch = System.Text.RegularExpressions.Regex.Match(xml, @"<friendlyName>(.+?)</friendlyName>");
+                                if (fnMatch.Success) friendlyName = fnMatch.Groups[1].Value;
+
+                                var mdMatch = System.Text.RegularExpressions.Regex.Match(xml, @"<modelName>(.+?)</modelName>");
+                                if (mdMatch.Success) modelName = mdMatch.Groups[1].Value;
+
+                                var udnMatch = System.Text.RegularExpressions.Regex.Match(xml, @"<UDN>uuid:(.+?)</UDN>");
+                                if (udnMatch.Success) uuid = udnMatch.Groups[1].Value;
+
+                                LogReceived?.Invoke($"[SSDP] Dispositivo encontrado: '{friendlyName}' ({modelName}) en {ip} vía interfaz {localIp}");
+                            }
+                            catch (Exception ex)
+                            {
+                                LogReceived?.Invoke($"[SSDP] No se pudo leer descripción de {ip}: {ex.Message}");
+                            }
+                        }
+
+                        devices.Add(new CastDevice
+                        {
+                            Name = friendlyName,
+                            ModelName = modelName,
+                            Host = ip,
+                            Port = 8009,
+                            Is4k = true,
+                            Uuid = uuid
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogReceived?.Invoke($"[SSDP] Error en interfaz {localIp}: {ex.Message}");
+            }
+            return devices;
         }
 
         public async Task<(bool success, string message)> StartCastAsync(CastDevice device, string streamUrl)
